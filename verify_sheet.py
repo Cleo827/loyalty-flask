@@ -1,69 +1,79 @@
 import os
 import json
+from datetime import datetime
+from flask import Flask, request, jsonify
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-from datetime import datetime
+from twilio.rest import Client
 
-# ---------------- Environment Variables ----------------
-TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID")
-TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
-TWILIO_WHATSAPP_NUMBER = os.environ.get("TWILIO_WHATSAPP_NUMBER")
-
-# Google credentials JSON stored as string in environment variable
-google_creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-creds_dict = json.loads(google_creds_json)
+app = Flask(__name__)
 
 # ---------------- Google Sheets Setup ----------------
-scope = ["https://spreadsheets.google.com/feeds",
-         "https://www.googleapis.com/auth/drive"]
+scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+
+# Load Google credentials from environment variable
+google_creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
+creds_dict = json.loads(google_creds_json)
 creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
 gc = gspread.authorize(creds)
 
-# ---------------- Sheets ----------------
-# Main customer sheet
+# Sheets
 sheet = gc.open("LoyaltyProgram").sheet1
-# Voucher sheet
 voucher_sheet = gc.open("LoyaltyProgram").worksheet("Vouchers")
-# History log sheet
-history_sheet = gc.open("LoyaltyProgram").worksheet("History")
+
+# ---------------- Twilio Setup ----------------
+twilio_sid = os.getenv("TWILIO_ACCOUNT_SID")
+twilio_token = os.getenv("TWILIO_AUTH_TOKEN")
+twilio_whatsapp_number = os.getenv("TWILIO_WHATSAPP_NUMBER")
+client = Client(twilio_sid, twilio_token)
 
 # ---------------- Helper Functions ----------------
-def get_customer(phone):
-    """Retrieve customer record by phone number"""
-    records = sheet.get_all_records()
-    for record in records:
+def get_customer_data():
+    return sheet.get_all_records()
+
+def verify_voucher(phone, voucher_code):
+    records = get_customer_data()
+    customer_row = None
+    for idx, record in enumerate(records, start=2):  # headers in row 1
         if str(record['Phone']) == str(phone):
-            return record
-    return None
+            customer_row = idx
+            break
 
-def redeem_voucher(phone, voucher_code):
-    """Redeem a voucher for a customer"""
-    customer = get_customer(phone)
-    if not customer:
-        return "Customer not found"
+    if not customer_row:
+        return False, "Customer not found."
 
-    # Check if voucher exists and is unused
-    vouchers = voucher_sheet.get_all_records()
-    voucher = next((v for v in vouchers if v['Code'] == voucher_code), None)
-    if not voucher:
-        return "Voucher not found"
-    if voucher.get('Used') == 'Yes':
-        return "Voucher already used"
+    vouchers = voucher_sheet.col_values(1)
+    if voucher_code not in vouchers:
+        return False, "Invalid voucher code."
 
     # Mark voucher as used
-    cell = voucher_sheet.find(voucher_code)
-    voucher_sheet.update_cell(cell.row, cell.col + 1, 'Yes')  # Assuming next column is 'Used'
+    row_index = vouchers.index(voucher_code) + 1
+    voucher_sheet.update_cell(row_index, 2, f"Used by {phone} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-    # Update customer points or log
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    log_entry = f"{now}: Redeemed voucher {voucher_code}"
-    history_sheet.append_row([phone, log_entry])
+    # Update customer points/history
+    current_points = records[customer_row-2]['Points']
+    sheet.update_cell(customer_row, 3, current_points + 1)
 
-    return "Voucher redeemed successfully"
+    return True, "Voucher redeemed successfully."
 
-# Example usage
+# ---------------- Flask Route for Twilio ----------------
+@app.route("/sms", methods=["POST"])
+def sms_reply():
+    from_number = request.form.get("From")
+    body = request.form.get("Body").strip()
+
+    # Expected format: VOUCHERCODE
+    voucher_code = body.upper()
+    success, message = verify_voucher(from_number.replace("whatsapp:", ""), voucher_code)
+
+    # Send response back via Twilio
+    client.messages.create(
+        body=message,
+        from_=twilio_whatsapp_number,
+        to=from_number
+    )
+
+    return jsonify({"status": "success", "message": message})
+
 if __name__ == "__main__":
-    phone = "2348152830742"
-    voucher_code = "GAS-DRG007"
-    result = redeem_voucher(phone, voucher_code)
-    print(result)
+    app.run(debug=True)
