@@ -1,133 +1,119 @@
 import os
 import json
 from flask import Flask, request
-from twilio.rest import Client
+from twilio.twiml.messaging_response import MessagingResponse
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
-# ===== Environment variables =====
-TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
-TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
-TWILIO_WHATSAPP_NUMBER = os.getenv("TWILIO_WHATSAPP_NUMBER")
-GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
+app = Flask(__name__)
 
-# ===== Twilio Client =====
-client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+# Environment variables for credentials
+GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON")
+TWILIO_WHATSAPP_NUMBER = os.environ.get("TWILIO_WHATSAPP_NUMBER")
 
-# ===== Google Sheets Setup =====
+# Google Sheets setup
 scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
 creds_dict = json.loads(GOOGLE_CREDENTIALS_JSON)
 creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
 gc = gspread.authorize(creds)
-sheet = gc.open("LoyaltyProgram").sheet1  # Replace with your spreadsheet name
+sheet = gc.open("LoyaltyProgram").sheet1  # Sheet name
 
-# ===== Flask App =====
-app = Flask(__name__)
+# Helper functions
+def get_user_row(name):
+    records = sheet.get_all_records()
+    for idx, rec in enumerate(records, start=2):  # Sheet rows start at 2
+        if rec.get("Name") == name:
+            return idx, rec
+    return None, None
 
-def send_whatsapp(to_number, message):
-    client.messages.create(
-        from_='whatsapp:' + TWILIO_WHATSAPP_NUMBER,
-        to='whatsapp:' + to_number,
-        body=message
-    )
+def update_points(row, points):
+    sheet.update_cell(row, 2, points)  # Assuming column B is Points
 
+def append_history(name, action):
+    sheet.append_row([name, action])
+
+# Webhook for Twilio WhatsApp
 @app.route("/whatsapp", methods=['POST'])
 def whatsapp_webhook():
     incoming_msg = request.values.get('Body', '').strip()
-    from_number = request.values.get('From', '').replace('whatsapp:', '')
+    from_number = request.values.get('From', '')
+    resp = MessagingResponse()
+    msg = resp.message()
 
-    # ==== Command: HI ====
-    if incoming_msg.lower() == "hi":
-        reply = (
-            "👋 Welcome to Petroflexi Energies Limited Loyalty Program!\n"
-            "Commands you can use:\n"
+    incoming_parts = incoming_msg.split()
+    command = incoming_parts[0].upper() if incoming_parts else ""
+
+    # HI command
+    if command == "HI":
+        msg.body(
+            "👋 Welcome to Petroflexi energies limited loyal program! Here are the commands you can use:\n"
             "JOIN <Your Name> - set your name\n"
-            "BUY <Voucher> - earn points\n"
+            "BUY <voucher> - earn points\n"
             "CHECK - see your points\n"
             "REDEEM - redeem points\n"
             "HISTORY - view your points history"
         )
-        send_whatsapp(from_number, reply)
-        return '', 200
-
-    # ==== Command: JOIN ====
-    if incoming_msg.lower().startswith("join "):
-        name = incoming_msg[5:].strip()
-        # Save user to sheet if not exists
-        users = sheet.col_values(1)
-        if name not in users:
-            sheet.append_row([name, 0])  # Name, Points
-        reply = f"Dear {name}, your registration was successful. Kindly type BUY followed by the voucher number given to you by the staff to earn points."
-        send_whatsapp(from_number, reply)
-        return '', 200
-
-    # ==== Command: BUY ====
-    if incoming_msg.lower().startswith("buy "):
-        voucher = incoming_msg[4:].strip()
-        # Here you should verify voucher using verify.py logic
-        # For demonstration, assume all vouchers starting with "GAS" are valid
-        users = sheet.get_all_records()
-        user_row = None
-        user_name = None
-        for idx, u in enumerate(users, start=2):
-            if from_number == u.get('Phone', from_number):  # Replace with actual phone check
-                user_row = idx
-                user_name = u['Name']
-        if voucher.startswith("GAS"):
-            # Increment points
-            if user_row:
-                current_points = int(sheet.cell(user_row, 2).value)
-                sheet.update_cell(user_row, 2, current_points + 1)
-            reply = f"Dear {user_name}, congratulations 👏 points updated successfully. Kindly send CHECK to see your current point balance."
+    # JOIN command
+    elif command == "JOIN" and len(incoming_parts) > 1:
+        name = " ".join(incoming_parts[1:])
+        row, _ = get_user_row(name)
+        if row:
+            msg.body(f"Dear {name}, you are already registered. Send BUY <voucher> to earn points.")
         else:
-            reply = f"Oops, sorry {user_name}, voucher is invalid. Kindly recheck and enter again."
-        send_whatsapp(from_number, reply)
-        return '', 200
-
-    # ==== Command: CHECK ====
-    if incoming_msg.lower() == "check":
-        users = sheet.get_all_records()
-        user_name = from_number
-        points = 0
-        for u in users:
-            if from_number == u.get('Phone', from_number):
-                user_name = u['Name']
-                points = u['Points']
-        send_whatsapp(from_number, f"💎 Your total points: {points}")
-        return '', 200
-
-    # ==== Command: REDEEM ====
-    if incoming_msg.lower() == "redeem":
-        users = sheet.get_all_records()
-        user_row = None
-        user_name = from_number
-        points = 0
-        for idx, u in enumerate(users, start=2):
-            if from_number == u.get('Phone', from_number):
-                user_row = idx
-                user_name = u['Name']
-                points = u['Points']
-        if points >= 10:
-            sheet.update_cell(user_row, 2, points - 10)
-            reply = f"Congratulations {user_name}, you have 🎉 redeemed 10 points for a reward!"
+            sheet.append_row([name, 0])  # Initialize points to 0
+            msg.body(
+                f"Dear {name}, your registration was successful. Kindly type BUY followed by the voucher number given to you by the Staff to earn points."
+            )
+    # BUY command
+    elif command == "BUY" and len(incoming_parts) > 1:
+        voucher = incoming_parts[1]
+        # Implement voucher validation logic here
+        # Example: pseudo logic (replace with real sheet validation)
+        name_row, user_data = get_user_row("Demo User")  # Replace "Demo User" with your lookup
+        if not name_row:
+            msg.body("You need to JOIN first.")
+        elif voucher == "GAS-LKM0P":
+            points = user_data.get("Points", 0) + 10
+            update_points(name_row, points)
+            append_history("Demo User", f"BUY {voucher}")
+            msg.body(f"Dear Demo User, congratulations 👏 points updated successfully. Kindly send CHECK to see your current point balance.")
         else:
-            reply = f"⚠ You need at least 10 points to redeem. Current: {points}"
-        send_whatsapp(from_number, reply)
-        return '', 200
-
-    # ==== Command: HISTORY ====
-    if incoming_msg.lower() == "history":
-        # Send the full history from sheet
+            msg.body(f"Oops, sorry Demo User, voucher is invalid. Kindly recheck and enter again.")
+    # CHECK command
+    elif command == "CHECK":
+        name_row, user_data = get_user_row("Demo User")  # Replace with correct name
+        if user_data:
+            points = user_data.get("Points", 0)
+            msg.body(f"💎 Your total points: {points}")
+        else:
+            msg.body("You need to JOIN first.")
+    # REDEEM command
+    elif command == "REDEEM":
+        name_row, user_data = get_user_row("Demo User")  # Replace with correct name
+        if user_data:
+            points = user_data.get("Points", 0)
+            if points >= 10:
+                points -= 10
+                update_points(name_row, points)
+                append_history("Demo User", "REDEEM 10 points")
+                msg.body("Congratulations! You have 🎉 Redeemed 10 points for a reward!")
+            else:
+                msg.body(f"⚠ You need at least 10 points to redeem. Current: {points}")
+        else:
+            msg.body("You need to JOIN first.")
+    # HISTORY command
+    elif command == "HISTORY":
         records = sheet.get_all_records()
         history_text = ""
-        for r in records:
-            history_text += f"{r['Name']}: {r['Points']} points\n"
-        send_whatsapp(from_number, history_text or "No history found.")
-        return '', 200
+        for rec in records:
+            history_text += f"{rec.get('Name')} - {rec.get('Points')} points\n"
+        msg.body(history_text or "No history yet.")
+    else:
+        msg.body("Unknown command. Please send HI to see available commands.")
 
-    # Unknown command
-    send_whatsapp(from_number, "⚠ Unknown command. Please type HI to see available commands.")
-    return '', 200
+    return str(resp)
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    import os
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=True)
