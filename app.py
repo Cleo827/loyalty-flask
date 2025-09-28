@@ -20,7 +20,7 @@ scope = ["https://spreadsheets.google.com/feeds","https://www.googleapis.com/aut
 creds_dict = eval(GOOGLE_CREDENTIALS_JSON)
 creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
 gc = gspread.authorize(creds)
-sheet = gc.open("gsa-loyalty").sheet1  # your sheet name
+sheet = gc.open("LoyaltyProgram").sheet1  # your sheet name
 
 # Helper functions
 def get_user_points(name):
