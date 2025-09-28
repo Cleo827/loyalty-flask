@@ -1,79 +1,79 @@
 import os
 import json
-from datetime import datetime
-from flask import Flask, request, jsonify
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from twilio.rest import Client
 
-app = Flask(__name__)
+# Load secrets from environment variables
+TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
+TWILIO_WHATSAPP_NUMBER = os.environ.get("TWILIO_WHATSAPP_NUMBER")
+GOOGLE_CREDENTIALS_JSON = json.loads(os.environ.get("GOOGLE_CREDENTIALS_JSON"))
 
-# ---------------- Google Sheets Setup ----------------
-scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+# Twilio client
+client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
-# Load Google credentials from environment variable
-google_creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
-creds_dict = json.loads(google_creds_json)
-creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+# Google Sheet setup
+scope = ["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
+creds = ServiceAccountCredentials.from_json_keyfile_dict(GOOGLE_CREDENTIALS_JSON, scope)
 gc = gspread.authorize(creds)
 
-# Sheets
-sheet = gc.open("LoyaltyProgram").sheet1
-voucher_sheet = gc.open("LoyaltyProgram").worksheet("Vouchers")
+SHEET_NAME = "loyalty"  # Replace with your sheet name
+sheet = gc.open(SHEET_NAME).sheet1
 
-# ---------------- Twilio Setup ----------------
-twilio_sid = os.getenv("TWILIO_ACCOUNT_SID")
-twilio_token = os.getenv("TWILIO_AUTH_TOKEN")
-twilio_whatsapp_number = os.getenv("TWILIO_WHATSAPP_NUMBER")
-client = Client(twilio_sid, twilio_token)
-
-# ---------------- Helper Functions ----------------
-def get_customer_data():
-    return sheet.get_all_records()
-
-def verify_voucher(phone, voucher_code):
-    records = get_customer_data()
-    customer_row = None
-    for idx, record in enumerate(records, start=2):  # headers in row 1
-        if str(record['Phone']) == str(phone):
-            customer_row = idx
-            break
-
-    if not customer_row:
-        return False, "Customer not found."
-
-    vouchers = voucher_sheet.col_values(1)
-    if voucher_code not in vouchers:
-        return False, "Invalid voucher code."
-
-    # Mark voucher as used
-    row_index = vouchers.index(voucher_code) + 1
-    voucher_sheet.update_cell(row_index, 2, f"Used by {phone} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-
-    # Update customer points/history
-    current_points = records[customer_row-2]['Points']
-    sheet.update_cell(customer_row, 3, current_points + 1)
-
-    return True, "Voucher redeemed successfully."
-
-# ---------------- Flask Route for Twilio ----------------
-@app.route("/sms", methods=["POST"])
-def sms_reply():
-    from_number = request.form.get("From")
-    body = request.form.get("Body").strip()
-
-    # Expected format: VOUCHERCODE
-    voucher_code = body.upper()
-    success, message = verify_voucher(from_number.replace("whatsapp:", ""), voucher_code)
-
-    # Send response back via Twilio
-    client.messages.create(
-        body=message,
-        from_=twilio_whatsapp_number,
-        to=from_number
-    )
-
-    return jsonify({"status": "success", "message": message})
-
-if __name__ == "__main__":
-    app.run(debug=True)
+def handle_message(msg):
+    msg_lower = msg.lower()
+    
+    # HI
+    if msg_lower == "hi":
+        return (
+            "👋 Welcome to Petroflexi energies limited loyal program! Here are the commands you can use:\n"
+            "JOIN <Your Name> - set your name\n"
+            "BUY <voucher> - earn points\n"
+            "CHECK - see your points\n"
+            "REDEEM - redeem points\n"
+            "HISTORY - view your points history"
+        )
+    
+    # JOIN
+    elif msg_lower.startswith("join "):
+        name = msg[5:].strip()
+        # Add user to sheet if needed
+        # sheet.append_row([name, 0])  # Example
+        return f"Dear {name}, your registration was successful. Kindly type BUY followed by the voucher number given to you by the Staff to earn points"
+    
+    # BUY
+    elif msg_lower.startswith("buy "):
+        voucher = msg[4:].strip()
+        # Lookup voucher logic in sheet
+        # Example logic:
+        user_name = "clement ataba"  # Replace with dynamic if needed
+        if voucher == "INVALID":
+            return f"Oops, sorry {user_name}, voucher is invalid. Kindly recheck and enter again."
+        elif voucher == "USED":
+            return f"Oops, sorry {user_name}, voucher is already used by another customer."
+        else:
+            return f"Dear {user_name}, congratulations 👏 points updated successfully. Kindly send CHECK to see your current point balance."
+    
+    # CHECK
+    elif msg_lower == "check":
+        points = 50  # Replace with dynamic sheet value
+        return f"💎 Your total points: {points}"
+    
+    # REDEEM
+    elif msg_lower == "redeem":
+        current_points = 10  # Replace with dynamic sheet value
+        if current_points >= 10:
+            # Deduct points logic
+            return "Congratulation you have 🎉 Redeemed 10 points for a reward!"
+        else:
+            return f"⚠ You need at least 10 points to redeem. Current: {current_points}"
+    
+    # HISTORY
+    elif msg_lower == "history":
+        # Fetch full history from sheet
+        history = ["01-01-2025: 10 points", "02-01-2025: 5 points"]  # Replace with dynamic
+        return "Your points history:\n" + "\n".join(history)
+    
+    else:
+        return "⚠ Unknown command. Please type HI to see available commands."
